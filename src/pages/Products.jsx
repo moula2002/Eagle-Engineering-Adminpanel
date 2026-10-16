@@ -1,13 +1,68 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Box, X, Upload } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Plus, Search, MoreVertical, Edit2, Trash2, Box, X, Upload, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import api from '../api/axios';
+import { initialProducts, initialCategories } from '../data/catalogSnapshot';
+
+const CACHE_KEY_PRODUCTS = 'eagle_admin_products';
+const CACHE_KEY_CATEGORIES = 'eagle_admin_categories';
+
+// Helper to load cached products safely with snapshot fallback
+const getCachedProducts = () => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY_PRODUCTS);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.warn('Failed to parse cached admin products', e);
+  }
+  return Array.isArray(initialProducts) ? initialProducts : [];
+};
+
+// Helper to load cached categories safely with snapshot fallback
+const getCachedCategories = () => {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY_CATEGORIES);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.warn('Failed to parse cached admin categories', e);
+  }
+  return Array.isArray(initialCategories) ? initialCategories : [];
+};
 
 const Products = () => {
-  const [products, setProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
+  const [products, setProducts] = useState(() => getCachedProducts());
+  const [categories, setCategories] = useState(() => getCachedCategories());
   const [allSubCategories, setAllSubCategories] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [feedbackMessage, setFeedbackMessage] = useState(null);
+
+  const [searchQuery, setSearchQuery] = useState(() => sessionStorage.getItem('admin_prod_search') || '');
+  const [selectedCategory, setSelectedCategory] = useState(() => sessionStorage.getItem('admin_prod_cat') || '');
+  const [currentPage, setCurrentPage] = useState(() => {
+    const saved = sessionStorage.getItem('admin_prod_page');
+    return saved ? parseInt(saved, 10) : 1;
+  });
+
+  useEffect(() => {
+    sessionStorage.setItem('admin_prod_search', searchQuery);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    sessionStorage.setItem('admin_prod_cat', selectedCategory);
+  }, [selectedCategory]);
+
+  useEffect(() => {
+    sessionStorage.setItem('admin_prod_page', currentPage.toString());
+  }, [currentPage]);
+
+  const itemsPerPage = 10;
 
   const [showModal, setShowModal] = useState(false);
   const [activeTab, setActiveTab] = useState('basic'); // basic, specs, seo, images
@@ -26,42 +81,137 @@ const Products = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
 
+  const showFeedback = (text, type = 'success') => {
+    setFeedbackMessage({ text, type });
+    setTimeout(() => {
+      setFeedbackMessage(null);
+    }, 4000);
+  };
+
   const getImageUrl = (imagePath) => {
     if (!imagePath) return '';
-    if (imagePath.startsWith('http') || imagePath.startsWith('data:')) return imagePath;
+    if (imagePath.startsWith('http') || imagePath.startsWith('data:') || imagePath.startsWith('/products')) return imagePath;
     const baseUrl = import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace('/api', '') : 'https://eagle-engineering-server.onrender.com';
     return `${baseUrl}${imagePath}`;
   };
 
-  useEffect(() => {
-    fetchProducts();
-    fetchCategoriesAndSubCategories();
+  // Helper to commit products state to memory, localStorage cache, and broadcast channel
+  const updateProductsStateAndCache = useCallback((newList) => {
+    setProducts(newList);
+    try {
+      localStorage.setItem(CACHE_KEY_PRODUCTS, JSON.stringify(newList));
+    } catch (e) {
+      console.warn('Failed to cache products to localStorage', e);
+    }
+
+    try {
+      const channel = new BroadcastChannel('eagle_sync_channel');
+      channel.postMessage({ type: 'PRODUCTS_UPDATED', count: newList.length, timestamp: Date.now() });
+      channel.close();
+    } catch (e) {}
   }, []);
 
-  const fetchProducts = async () => {
+  const fetchProducts = useCallback(async (isManual = false) => {
     try {
+      if (isManual) setRefreshing(true);
       const response = await api.get('/products');
-      setProducts(response.data.data);
-    } catch (error) {
-      console.error('Error fetching products:', error);
-      setError('Failed to fetch products.');
+      let fetchedList = [];
+      if (response.data && Array.isArray(response.data.data)) {
+        fetchedList = response.data.data;
+      } else if (Array.isArray(response.data)) {
+        fetchedList = response.data;
+      }
+
+      if (fetchedList.length > 0) {
+        // Ensure products are sorted by newest first
+        const sorted = [...fetchedList].sort((a, b) => {
+          const dateA = new Date(a.createdAt || 0).getTime();
+          const dateB = new Date(b.createdAt || 0).getTime();
+          return dateB - dateA;
+        });
+        updateProductsStateAndCache(sorted);
+      }
+      setError(null);
+      if (isManual) {
+        showFeedback(`Catalog synced (${fetchedList.length} products total)`);
+      }
+    } catch (err) {
+      console.error('Error fetching products:', err);
+      if (!products || products.length === 0) {
+        setError('Failed to fetch products from server. Showing cached catalog.');
+      }
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, [products, updateProductsStateAndCache]);
 
-  const fetchCategoriesAndSubCategories = async () => {
+  const fetchCategoriesAndSubCategories = useCallback(async () => {
     try {
       const [catRes, subRes] = await Promise.all([
         api.get('/categories'),
         api.get('/sub-categories')
       ]);
-      setCategories(catRes.data.data);
-      setAllSubCategories(subRes.data.data);
-    } catch (error) {
-      console.error('Error fetching categories/subcategories:', error);
+      if (catRes.data && Array.isArray(catRes.data.data) && catRes.data.data.length > 0) {
+        setCategories(catRes.data.data);
+        try {
+          localStorage.setItem(CACHE_KEY_CATEGORIES, JSON.stringify(catRes.data.data));
+        } catch (e) {}
+      }
+      if (subRes.data && Array.isArray(subRes.data.data)) {
+        setAllSubCategories(subRes.data.data);
+      }
+    } catch (err) {
+      console.error('Error fetching categories/subcategories:', err);
     }
-  };
+  }, []);
+
+  // Initial fetch and cross-tab sync listeners
+  useEffect(() => {
+    fetchProducts();
+    fetchCategoriesAndSubCategories();
+
+    // Cross-tab real-time sync channel
+    let syncChannel;
+    try {
+      syncChannel = new BroadcastChannel('eagle_sync_channel');
+      syncChannel.onmessage = (event) => {
+        if (event.data?.type === 'PRODUCTS_UPDATED') {
+          // Re-read from cache if available or re-fetch
+          const cached = getCachedProducts();
+          if (cached.length > 0) {
+            setProducts(cached);
+          }
+        }
+      };
+    } catch (e) {}
+
+    // Storage event for cross-window updates
+    const handleStorageChange = (e) => {
+      if (e.key === CACHE_KEY_PRODUCTS && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setProducts(parsed);
+          }
+        } catch (err) {}
+      }
+      if (e.key === CACHE_KEY_CATEGORIES && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setCategories(parsed);
+          }
+        } catch (err) {}
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      if (syncChannel) syncChannel.close();
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, [fetchProducts, fetchCategoriesAndSubCategories]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -81,8 +231,8 @@ const Products = () => {
     setFormData({
       name: product.name || '',
       sku: product.sku || '',
-      category: product.category?._id || '',
-      subCategory: product.subCategory?._id || '',
+      category: product.category?._id || (typeof product.category === 'string' ? product.category : ''),
+      subCategory: product.subCategory?._id || (typeof product.subCategory === 'string' ? product.subCategory : ''),
       status: product.status || 'Active',
       brand: product.brand || '',
       shortDescription: product.shortDescription || '',
@@ -99,13 +249,22 @@ const Products = () => {
   };
 
   const handleDelete = async (id) => {
-    if (window.confirm('Are you sure you want to delete this product?')) {
+    if (window.confirm('Are you sure you want to delete this product? This will permanently remove it from the catalog.')) {
+      // 1. Immediate optimistic UI deletion
+      const previousProducts = [...products];
+      const updatedList = products.filter((p) => p._id !== id);
+      updateProductsStateAndCache(updatedList);
+      showFeedback('Product deleted successfully');
+
       try {
         await api.delete(`/products/${id}`);
+        // Background refresh to confirm server state
         fetchProducts();
       } catch (err) {
         console.error('Error deleting product:', err);
-        alert('Failed to delete product');
+        // Rollback on failure
+        updateProductsStateAndCache(previousProducts);
+        alert('Failed to delete product from server. Reverted change.');
       }
     }
   };
@@ -152,18 +311,69 @@ const Products = () => {
     }
 
     try {
+      let savedProduct;
       if (editingId) {
-        await api.put(`/products/${editingId}`, payload);
+        const res = await api.put(`/products/${editingId}`, payload);
+        savedProduct = res.data?.data;
+        
+        // Ensure category and subcategory info is fully populated
+        if (savedProduct) {
+          if (typeof savedProduct.category === 'string' || !savedProduct.category?.name) {
+            const catId = savedProduct.category?._id || savedProduct.category;
+            const foundCat = categories.find(c => c._id === catId);
+            savedProduct.category = foundCat ? { _id: foundCat._id, name: foundCat.name } : { _id: catId, name: '' };
+          }
+          if (savedProduct.subCategory && (typeof savedProduct.subCategory === 'string' || !savedProduct.subCategory?.name)) {
+            const subId = savedProduct.subCategory?._id || savedProduct.subCategory;
+            const foundSub = allSubCategories.find(s => s._id === subId);
+            savedProduct.subCategory = foundSub ? { _id: foundSub._id, name: foundSub.name } : { _id: subId, name: '' };
+          }
+
+          const updatedList = products.map(p => p._id === editingId ? { ...p, ...savedProduct } : p);
+          updateProductsStateAndCache(updatedList);
+          showFeedback('Product updated successfully!');
+        }
       } else {
-        await api.post('/products', payload);
+        const res = await api.post('/products', payload);
+        savedProduct = res.data?.data;
+
+        if (savedProduct) {
+          if (typeof savedProduct.category === 'string' || !savedProduct.category?.name) {
+            const catId = savedProduct.category?._id || savedProduct.category;
+            const foundCat = categories.find(c => c._id === catId);
+            savedProduct.category = foundCat ? { _id: foundCat._id, name: foundCat.name } : { _id: catId, name: '' };
+          }
+          if (savedProduct.subCategory && (typeof savedProduct.subCategory === 'string' || !savedProduct.subCategory?.name)) {
+            const subId = savedProduct.subCategory?._id || savedProduct.subCategory;
+            const foundSub = allSubCategories.find(s => s._id === subId);
+            savedProduct.subCategory = foundSub ? { _id: foundSub._id, name: foundSub.name } : { _id: subId, name: '' };
+          }
+
+          // Prepend new product immediately to the top of the list
+          const updatedList = [savedProduct, ...products.filter(p => p._id !== savedProduct._id)];
+          updateProductsStateAndCache(updatedList);
+
+          // If the user had filtered by a different category or had a search active, reset so the new product is visible
+          const newProdCatId = savedProduct.category?._id || savedProduct.category;
+          if (selectedCategory && selectedCategory !== newProdCatId) {
+            setSelectedCategory(newProdCatId || '');
+          }
+          setSearchQuery('');
+          setCurrentPage(1);
+
+          showFeedback('New product added to catalog successfully!');
+        }
       }
+
       setShowModal(false);
       setEditingId(null);
       setFormData(initialFormState);
       setActiveTab('basic');
+
+      // Seamless background revalidation to guarantee server persistence
       fetchProducts();
     } catch (err) {
-      console.error('Error adding product:', err);
+      console.error('Error saving product:', err);
       alert(err.response?.data?.message || 'Failed to save product');
     } finally {
       setIsSubmitting(false);
@@ -178,22 +388,91 @@ const Products = () => {
     }
   };
 
+  // Filtered products calculation
+  const filteredProducts = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+
+    return products.filter((product) => {
+      const matchesSearch = !q || 
+        (product.name && product.name.toLowerCase().includes(q)) ||
+        (product.sku && product.sku.toLowerCase().includes(q)) ||
+        (product.brand && product.brand.toLowerCase().includes(q)) ||
+        (product.category?.name && product.category.name.toLowerCase().includes(q));
+        
+      let matchesCategory = true;
+      if (selectedCategory) {
+        const prodCatId = product.category?._id || (typeof product.category === 'string' ? product.category : '');
+        const prodCatName = product.category?.name || '';
+        matchesCategory = prodCatId === selectedCategory || prodCatName.toLowerCase() === selectedCategory.toLowerCase();
+      }
+        
+      return matchesSearch && matchesCategory;
+    });
+  }, [products, searchQuery, selectedCategory]);
+
+  const totalPages = Math.ceil(filteredProducts.length / itemsPerPage) || 1;
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const paginatedProducts = filteredProducts.slice(startIndex, startIndex + itemsPerPage);
+
+  const handleClearFilters = () => {
+    setSearchQuery('');
+    setSelectedCategory('');
+    setCurrentPage(1);
+  };
+
   return (
     <div className="space-y-6">
+      {/* Toast Notification */}
+      {feedbackMessage && (
+        <div className={`fixed top-5 right-5 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg border text-sm font-medium transition-all duration-300 ${
+          feedbackMessage.type === 'success' 
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+            : 'bg-red-50 border-red-200 text-red-800'
+        }`}>
+          {feedbackMessage.type === 'success' ? (
+            <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+          ) : (
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+          )}
+          <span>{feedbackMessage.text}</span>
+          <button 
+            onClick={() => setFeedbackMessage(null)}
+            className="ml-2 text-slate-400 hover:text-slate-600"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Products Management</h1>
-        <button 
-          onClick={() => {
-            setEditingId(null);
-            setFormData(initialFormState);
-            setActiveTab('basic');
-            setShowModal(true);
-          }}
-          className="bg-gradient-to-r from-[#0b2545] to-[#1a385f] hover:from-[#1a385f] hover:to-[#264b77] text-white px-5 py-2.5 rounded-lg font-medium transition-all duration-300 shadow-md hover:shadow-lg hover:-translate-y-0.5 flex items-center"
-        >
-          <Plus className="w-5 h-5 mr-2" />
-          Add Product
-        </button>
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Products Management</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Manage your catalog ({products.length} total products in database)
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => fetchProducts(true)} 
+            disabled={refreshing}
+            className="flex items-center px-4 py-2.5 border border-slate-200 bg-white hover:bg-slate-50 rounded-lg text-sm font-medium text-slate-700 transition-colors shadow-sm disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin text-[#0b2545]' : ''}`} />
+            {refreshing ? 'Syncing...' : 'Sync Catalog'}
+          </button>
+          <button 
+            onClick={() => {
+              setEditingId(null);
+              setFormData(initialFormState);
+              setActiveTab('basic');
+              setShowModal(true);
+            }}
+            className="bg-gradient-to-r from-[#0b2545] to-[#1a385f] hover:from-[#1a385f] hover:to-[#264b77] text-white px-5 py-2.5 rounded-lg font-medium transition-all duration-300 shadow-md hover:shadow-lg hover:-translate-y-0.5 flex items-center"
+          >
+            <Plus className="w-5 h-5 mr-2" />
+            Add Product
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
@@ -202,25 +481,83 @@ const Products = () => {
             <Search className="w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" />
             <input 
               type="text" 
-              placeholder="Search products..." 
-              className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0b2545] focus:border-transparent"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
+              placeholder="Search products by name, SKU..." 
+              className="w-full pl-10 pr-10 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0b2545] focus:border-transparent"
             />
+            {searchQuery && (
+              <button 
+                onClick={() => {
+                  setSearchQuery('');
+                  setCurrentPage(1);
+                }}
+                className="absolute right-3 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
-          <div className="flex gap-2">
-            <button className="flex items-center px-4 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors">
-              <Filter className="w-4 h-4 mr-2" />
-              Filter by Category
-            </button>
+          <div className="flex gap-2 items-center flex-wrap">
+            <div className="relative">
+              <select 
+                value={selectedCategory}
+                onChange={(e) => {
+                  setSelectedCategory(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="pl-3 pr-8 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors focus:outline-none focus:ring-2 focus:ring-[#0b2545]"
+              >
+                <option value="">All Categories ({products.length})</option>
+                {categories.map((c) => (
+                  <option key={c._id} value={c._id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {(selectedCategory || searchQuery) && (
+              <button
+                onClick={handleClearFilters}
+                className="px-3 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1"
+                title="Clear all filters"
+              >
+                <X className="w-3.5 h-3.5" />
+                Clear Filter
+              </button>
+            )}
           </div>
         </div>
         
         <div className="overflow-x-auto">
-          {loading ? (
-            <div className="p-8 text-center text-slate-500">Loading products...</div>
-          ) : error ? (
+          {loading && products.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 flex flex-col items-center justify-center">
+              <RefreshCw className="w-6 h-6 animate-spin text-[#0b2545] mb-2" />
+              <span>Loading products catalog...</span>
+            </div>
+          ) : error && products.length === 0 ? (
             <div className="p-8 text-center text-red-500">{error}</div>
-          ) : products.length === 0 ? (
-            <div className="p-8 text-center text-slate-500">No products found.</div>
+          ) : paginatedProducts.length === 0 ? (
+            <div className="p-12 text-center text-slate-500">
+              <Box className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+              <p className="text-base font-semibold text-slate-700 mb-1">
+                {searchQuery || selectedCategory ? 'No products match your search/filter.' : 'No products found.'}
+              </p>
+              <p className="text-xs text-slate-400 mb-4">
+                {selectedCategory ? 'Try selecting a different category or clearing filters.' : 'Click "Add Product" above to create your first product.'}
+              </p>
+              {(searchQuery || selectedCategory) && (
+                <button
+                  onClick={handleClearFilters}
+                  className="px-4 py-2 bg-[#0b2545] text-white rounded-lg text-xs font-semibold hover:bg-[#1a385f] transition-colors shadow-sm inline-flex items-center gap-1.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  View All Products ({products.length})
+                </button>
+              )}
+            </div>
           ) : (
             <table className="w-full text-left border-collapse">
               <thead>
@@ -232,12 +569,20 @@ const Products = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {products.map((product) => (
+                {paginatedProducts.map((product) => (
                   <tr key={product._id} className="hover:bg-slate-50/50 transition-colors group">
                     <td className="px-6 py-4">
                       <div className="flex items-center">
                         {product.mainImage ? (
-                          <img src={getImageUrl(product.mainImage)} alt={product.name} className="w-12 h-12 rounded-lg object-cover border border-slate-200 mr-4" />
+                          <img 
+                            src={getImageUrl(product.mainImage)} 
+                            alt={product.name} 
+                            onError={(e) => {
+                              e.currentTarget.onerror = null;
+                              e.currentTarget.src = '/logo_new.png';
+                            }}
+                            className="w-12 h-12 rounded-lg object-cover border border-slate-200 mr-4 bg-slate-50" 
+                          />
                         ) : (
                           <div className="w-12 h-12 rounded-lg bg-gray-50 border border-gray-100 flex items-center justify-center mr-4">
                             <Box className="w-6 h-6 text-gray-400" />
@@ -245,7 +590,7 @@ const Products = () => {
                         )}
                         <div>
                           <div className="font-medium text-slate-800">{product.name}</div>
-                          <div className="text-xs text-slate-500 mt-1">SKU: {product.sku || `EG-${product._id.substring(0, 5)}`}</div>
+                          <div className="text-xs text-slate-500 mt-1">SKU: {product.sku || `EG-${String(product._id).substring(0, 5)}`}</div>
                         </div>
                       </div>
                     </td>
@@ -260,10 +605,10 @@ const Products = () => {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => handleEdit(product)} className="p-2 text-slate-400 hover:text-[#0b2545] hover:bg-blue-50 rounded-lg transition-colors">
+                        <button onClick={() => handleEdit(product)} className="p-2 text-slate-400 hover:text-[#0b2545] hover:bg-blue-50 rounded-lg transition-colors" title="Edit">
                           <Edit2 className="w-4 h-4" />
                         </button>
-                        <button onClick={() => handleDelete(product._id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                        <button onClick={() => handleDelete(product._id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
                           <Trash2 className="w-4 h-4" />
                         </button>
                         <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
@@ -278,13 +623,47 @@ const Products = () => {
           )}
         </div>
         
-        {!loading && products.length > 0 && (
-          <div className="p-4 border-t border-slate-100 flex items-center justify-between text-sm text-slate-500">
-            <div>Showing 1 to {products.length} of {products.length} entries</div>
-            <div className="flex gap-1">
-              <button className="px-3 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50" disabled>Prev</button>
-              <button className="px-3 py-1 border border-slate-200 rounded bg-[#0b2545] text-white font-medium">1</button>
-              <button className="px-3 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50" disabled>Next</button>
+        {filteredProducts.length > 0 && (
+          <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-slate-500">
+            <div>
+              Showing {startIndex + 1} to {Math.min(startIndex + itemsPerPage, filteredProducts.length)} of {filteredProducts.length} entries
+              {filteredProducts.length !== products.length && ` (filtered from ${products.length} total)`}
+            </div>
+            <div className="flex items-center gap-1">
+              <button 
+                onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className="px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-40 transition-colors"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, i) => i + 1)
+                .filter((page) => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+                .map((page, index, array) => {
+                  const showEllipsis = index > 0 && page - array[index - 1] > 1;
+                  return (
+                    <React.Fragment key={page}>
+                      {showEllipsis && <span className="px-2 text-slate-400">...</span>}
+                      <button
+                        onClick={() => setCurrentPage(page)}
+                        className={`w-8 h-8 rounded-lg text-sm font-medium transition-colors ${
+                          currentPage === page
+                            ? 'bg-[#0b2545] text-white shadow-sm'
+                            : 'border border-slate-200 hover:bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    </React.Fragment>
+                  );
+                })}
+              <button 
+                onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                disabled={currentPage === totalPages}
+                className="px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-40 transition-colors"
+              >
+                Next
+              </button>
             </div>
           </div>
         )}
@@ -328,8 +707,8 @@ const Products = () => {
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Sub Category</label>
                     <select name="subCategory" value={formData.subCategory} onChange={handleInputChange} className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#0b2545]">
-                      <option value="" disabled>Select Sub Category</option>
-                      {allSubCategories.filter(sub => !formData.category || (sub.category && sub.category._id === formData.category)).map(sub => (
+                      <option value="">Select Sub Category</option>
+                      {allSubCategories.filter(sub => !formData.category || (sub.category && (sub.category._id === formData.category || sub.category === formData.category))).map(sub => (
                         <option key={sub._id} value={sub._id}>{sub.name}</option>
                       ))}
                     </select>
