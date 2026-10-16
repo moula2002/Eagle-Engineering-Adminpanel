@@ -21,6 +21,7 @@ import Products from './pages/Products';
 import Inquiries from './pages/Inquiries';
 
 import AdminLogin from './pages/AdminLogin';
+import SettingsPage from './pages/Settings';
 
 const Sidebar = ({ isOpen, setIsOpen }) => {
   const location = useLocation();
@@ -148,7 +149,7 @@ const AppContent = () => {
             <Route path="/categories" element={<ProtectedRoute><Category /></ProtectedRoute>} />
             <Route path="/sub-categories" element={<ProtectedRoute><SubCategory /></ProtectedRoute>} />
             <Route path="/inquiries" element={<ProtectedRoute><Inquiries /></ProtectedRoute>} />
-            <Route path="/settings" element={<ProtectedRoute><div className="p-6 bg-white rounded-xl shadow-sm"><h2 className="text-2xl font-bold mb-4">Settings</h2><p className="text-slate-600">Configuration options will go here.</p></div></ProtectedRoute>} />
+            <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           </Routes>
         </main>
       </div>
