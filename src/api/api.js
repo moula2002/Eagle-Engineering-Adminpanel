@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server.onrender.com/api';
+export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server-dzor.onrender.com/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -18,10 +18,32 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    if (originalRequest && (!originalRequest.method || originalRequest.method.toLowerCase() === 'get')) {
+      originalRequest._retryCount = originalRequest._retryCount || 0;
+      const isTransientError =
+        !error.response ||
+        error.code === 'ERR_NETWORK' ||
+        [502, 503, 504].includes(error.response?.status);
+
+      if (isTransientError && originalRequest._retryCount < 3) {
+        originalRequest._retryCount += 1;
+        const delay = originalRequest._retryCount * 1500;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        return api(originalRequest);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const getImageUrl = (imagePath) => {
   if (!imagePath) return '';
   if (imagePath.startsWith('/uploads')) {
-    return `https://eagle-engineering-server.onrender.com${imagePath}`;
+    return `https://eagle-engineering-server-dzor.onrender.com${imagePath}`;
   }
   return imagePath;
 };

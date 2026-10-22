@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server.onrender.com/api';
+export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server-dzor.onrender.com/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -19,10 +19,28 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response Interceptor: Handle global errors like 401 Unauthorized
+// Response Interceptor: Handle global errors like 401 Unauthorized & auto-retry on 502/cold-starts
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    const originalRequest = error.config;
+
+    // Auto-retry cold starts or temporary 502/503/504/network errors on GET requests
+    if (originalRequest && (!originalRequest.method || originalRequest.method.toLowerCase() === 'get')) {
+      originalRequest._retryCount = originalRequest._retryCount || 0;
+      const isTransientError =
+        !error.response ||
+        error.code === 'ERR_NETWORK' ||
+        [502, 503, 504].includes(error.response?.status);
+
+      if (isTransientError && originalRequest._retryCount < 3) {
+        originalRequest._retryCount += 1;
+        const delay = originalRequest._retryCount * 1500;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        return api(originalRequest);
+      }
+    }
+
     if (error.response && error.response.status === 401) {
       // Token expired or invalid
       localStorage.removeItem('adminToken');
