@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server-dzor.onrender.com/api';
+export const API_URL = import.meta.env.VITE_API_URL || 'https://eagle-engineering-server-15wn.onrender.com/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -43,7 +43,7 @@ api.interceptors.response.use(
 export const getImageUrl = (imagePath) => {
   if (!imagePath) return '';
   if (imagePath.startsWith('/uploads')) {
-    return `https://eagle-engineering-server-dzor.onrender.com${imagePath}`;
+    return `https://eagle-engineering-server-15wn.onrender.com${imagePath}`;
   }
   return imagePath;
 };
